@@ -1,0 +1,153 @@
+name: Publish GHCR image (manual)
+
+# Manual-only publisher for a multi-arch image on GitHub Container Registry.
+# Authentication uses the workflow GITHUB_TOKEN; no repository secrets are required.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ghcr-manual-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, push, and verify (linux/amd64, linux/arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Pin the exact commit so the image matches GITHUB_SHA even if the
+          # selected branch advances while the run is queued.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve image name and version
+        id: prep
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected commit SHA '${SHA}'"
+            exit 1
+          fi
+          image="ghcr.io/${REPOSITORY,,}"
+          if [[ ! "${image}" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+$ ]]; then
+            echo "::error::Repository '${REPOSITORY}' does not form a valid GHCR image name"
+            exit 1
+          fi
+          tag="sha-${SHA:0:12}"
+
+          # The image tag, the embedded frontend version, and the ldflags version
+          # all derive from this value, so it describes exactly GITHUB_SHA.
+          printf '%s\n' "${tag}" > VERSION
+
+          {
+            echo "image=${image}"
+            echo "sha=${SHA}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Building ${image}:${tag} from ${SHA}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.prep.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.prep.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.prep.outputs.sha }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=ghcr-manual
+          cache-to: type=gha,scope=ghcr-manual,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify manifest and summarize
+        env:
+          IMAGE: ${{ steps.prep.outputs.image }}
+          TAG: ${{ steps.prep.outputs.tag }}
+          REVISION: ${{ steps.prep.outputs.sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected build digest '${DIGEST}'"
+            exit 1
+          fi
+
+          ref="${IMAGE}:${TAG}"
+          docker buildx imagetools inspect "${ref}" > manifest.txt
+
+          # The raw index is stored byte-for-byte, so its checksum must equal the
+          # digest the build reported for the pushed multi-platform manifest.
+          docker buildx imagetools inspect --raw "${ref}" > index.json
+          actual_digest="sha256:$(sha256sum index.json | cut -d' ' -f1)"
+          if [ "${actual_digest}" != "${DIGEST}" ]; then
+            echo "::error::Published ${ref} has digest ${actual_digest}, build reported ${DIGEST}"
+            exit 1
+          fi
+
+          # Compare only os and architecture: arm64 is commonly reported as
+          # linux/arm64/v8, and attestation manifests carry no platform.
+          if ! jq -e '
+            [.manifests[]
+             | select(.platform.os == "linux")
+             | .platform.architecture]
+            | (index("amd64") != null) and (index("arm64") != null)
+          ' index.json > /dev/null
+          then
+            echo "::error::Published ${ref} is not a linux/amd64 + linux/arm64 index"
+            exit 1
+          fi
+
+          {
+            echo '### GHCR image'
+            echo
+            echo '| Field | Value |'
+            echo '| --- | --- |'
+            echo "| Image | \`${ref}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo "| Platforms | \`linux/amd64\` \`linux/arm64\` |"
+            echo "| Version | \`${TAG}\` |"
+            echo "| Revision | \`${REVISION}\` |"
+            echo
+            echo '```'
+            cat manifest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

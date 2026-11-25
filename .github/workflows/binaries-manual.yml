@@ -1,0 +1,188 @@
+# Manual, artifact-only binary builds.
+#
+# Nothing is published from this workflow: no GitHub release, no container
+# registry, no tag update. It exists to hand an operator downloadable,
+# version-stamped binaries built from the commit selected in the run dialog.
+#
+# Each job builds natively on its own platform, embeds the production web
+# console (web/dist) with a real `go build`, and refuses to upload unless the
+# resulting binary reports exactly the version derived from the checked-out
+# commit. Checksums and the project license/notice files ship with every
+# artifact.
+
+name: Binaries (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binaries-manual-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOWORK: 'off'
+  CGO_ENABLED: '0'
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners only: no cross-compilation toolchains required.
+          # macos-latest currently resolves to an arm64 machine; macos-15 is the
+          # pinned arm64 image (macos-latest may migrate to a newer OS later).
+          # The architecture guard below fails the job if a runner's machine
+          # type does not match the target, so a foreign-architecture binary can
+          # never reach the version check.
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout selected commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      # The version check below executes the produced binary, so the runner must
+      # natively run the target. Fail fast instead of silently cross-compiling.
+      - name: Preflight runner matches target
+        env:
+          TARGET_ARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64 | amd64) host_arch=amd64 ;;
+            aarch64 | arm64) host_arch=arm64 ;;
+            *) host_arch="$(uname -m)" ;;
+          esac
+          if [ "${host_arch}" != "${TARGET_ARCH}" ]; then
+            echo "::error::runner '${RUNNER_NAME}' is ${host_arch}, but this matrix entry targets ${TARGET_ARCH}; pick a matching runner"
+            exit 1
+          fi
+
+      - name: Derive version from commit
+        id: version
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          if [ "${commit}" != "${GITHUB_SHA}" ]; then
+            echo "::error::checked out ${commit}, but this run was dispatched for ${GITHUB_SHA}"
+            exit 1
+          fi
+          version="sha-${commit:0:12}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+
+      - name: Build web console
+        env:
+          CI: ''
+          NODE_OPTIONS: '--max-old-space-size=4096'
+          VITE_REACT_APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd web
+          bun install --frozen-lockfile
+          DISABLE_ESLINT_PLUGIN='true' bun run build
+          cd ..
+          test -s web/dist/index.html
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            relaykit/go.sum
+            tokenkit/go.sum
+
+      - name: Build binary
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          go mod download
+          binary="new-api_${APP_VERSION}_${GOOS}_${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            binary="${binary}.exe"
+          fi
+          mkdir -p out
+          pgo="$(go list -m -f '{{.Dir}}' github.com/MoeForge/moejs)/default.pgo"
+          go build -pgo="${pgo}" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=${APP_VERSION}'" -o "out/${binary}" .
+          echo "BINARY=${binary}" >> "${GITHUB_ENV}"
+
+      - name: Verify stamped version
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Windows binaries print CRLF; strip CR before comparing.
+          reported="$(./out/"${BINARY}" --version | tr -d '\r')"
+          if [ "${reported}" != "${APP_VERSION}" ]; then
+            echo "::error::binary reports '${reported}', expected '${APP_VERSION}'"
+            exit 1
+          fi
+          echo "binary reports ${reported}"
+
+      - name: Package artifacts
+        run: |
+          set -euo pipefail
+          # Portable SHA-256: GNU coreutils on Linux, shasum on macOS, both
+          # available under Git Bash on Windows.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256() { sha256sum "$@"; }
+          else
+            sha256() { shasum -a 256 "$@"; }
+          fi
+
+          cp LICENSE NOTICE THIRD-PARTY-LICENSES.md out/
+          ( cd out && sha256 "${BINARY}" > "${BINARY}.sha256" && sha256 -c "${BINARY}.sha256" )
+
+          mkdir -p dist
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            # Windows has no POSIX executable bit, so a plain artifact ZIP loses
+            # nothing: ship the .exe with its checksum and the notices.
+            cp out/* dist/
+          else
+            # upload-artifact re-archives into a ZIP, which drops POSIX modes and
+            # would leave the binary non-executable after download. Ship a tar.gz
+            # that carries the executable bit, plus a checksum of the archive so
+            # the download can be verified before extraction.
+            tar -czf "dist/${BINARY}.tar.gz" -C out .
+            tar -tzf "dist/${BINARY}.tar.gz" > /dev/null
+            ( cd dist && sha256 "${BINARY}.tar.gz" > "${BINARY}.tar.gz.sha256" && sha256 -c "${BINARY}.tar.gz.sha256" )
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: new-api_${{ steps.version.outputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
