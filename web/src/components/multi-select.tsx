@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { Add01Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { ArrowRightLeft } from 'lucide-react'
+import { ArrowRightLeft, Loader2 } from 'lucide-react'
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -36,6 +36,7 @@ import {
   ComboboxValue,
   useComboboxAnchor,
 } from '@/components/ui/combobox'
+import { useDebounce } from '@/hooks/use-debounce'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
 import { cn } from '@/lib/utils'
 
@@ -71,6 +72,11 @@ interface MultiSelectProps {
   emptyText?: string
   /** Optional `id` to wire labels/aria-describedby to the input. */
   id?: string
+  /**
+   * Accessible name for the input. Falls back to the placeholder. Set this when
+   * an external `<label>` names the field, so the announced name matches it.
+   */
+  ariaLabel?: string
   /** Disable the entire control. */
   disabled?: boolean
   /**
@@ -88,6 +94,19 @@ interface MultiSelectProps {
    * instead of being inert. The remove (×) button keeps its own behaviour.
    */
   copyChipOnClick?: boolean
+  /**
+   * Reports the current typed query so a caller can fetch matching options
+   * remotely. When provided, the built-in client-side filtering is disabled and
+   * the caller owns the candidate list; selected values stay visible regardless
+   * of what the current option list contains.
+   */
+  onSearchChange?: (query: string) => void
+  /** Debounce for `onSearchChange`, in milliseconds. Defaults to 250. */
+  searchDebounceMs?: number
+  /** Show a loading row inside the popup while remote options are pending. */
+  searchLoading?: boolean
+  /** Notifies the caller when the popup opens or closes. */
+  onOpenChange?: (open: boolean) => void
 }
 
 const COMMA_REGEX = /[,，\n]/
@@ -134,6 +153,29 @@ export function MultiSelect(props: MultiSelectProps) {
   const [inputValue, setInputValue] = React.useState('')
   const [open, setOpen] = React.useState(false)
   const [expanded, setExpanded] = React.useState(false)
+
+  const remoteSearch = props.onSearchChange != null
+  const debouncedInput = useDebounce(
+    inputValue.trim(),
+    props.searchDebounceMs ?? 250
+  )
+  const onSearchChangeRef = React.useRef(props.onSearchChange)
+  onSearchChangeRef.current = props.onSearchChange
+  const onOpenChangeRef = React.useRef(props.onOpenChange)
+  onOpenChangeRef.current = props.onOpenChange
+
+  const handleOpenChange = React.useCallback((nextOpen: boolean) => {
+    setOpen(nextOpen)
+    onOpenChangeRef.current?.(nextOpen)
+  }, [])
+
+  React.useEffect(() => {
+    if (!remoteSearch) return
+    // Only ask the server while the popup can show the answer; a closed
+    // combobox keeps its previously fetched options.
+    if (!open) return
+    onSearchChangeRef.current?.(debouncedInput)
+  }, [debouncedInput, open, remoteSearch])
 
   const selectedSet = React.useMemo(
     () => new Set(props.selected),
@@ -182,7 +224,9 @@ export function MultiSelect(props: MultiSelectProps) {
 
   // We expose all known option values + every currently selected value to Base
   // UI's items list. This way Base UI filters them by the search query and the
-  // user can still see the chip labels mapped correctly.
+  // user can still see the chip labels mapped correctly. Selected values must
+  // stay in the list even when a remote search no longer returns them, so their
+  // chips keep working and the choice stays visible.
   const items = React.useMemo(() => {
     const set = new Set<string>(props.options.map((option) => option.value))
     for (const value of props.selected) {
@@ -300,8 +344,11 @@ export function MultiSelect(props: MultiSelectProps) {
       inputValue={inputValue}
       onInputValueChange={handleInputValueChange}
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={handleOpenChange}
       disabled={props.disabled}
+      // Remote options are already narrowed by the server, so Base UI must not
+      // filter them again with the typed query.
+      filter={remoteSearch ? null : undefined}
     >
       <ComboboxChips
         ref={chipsAnchorRef}
@@ -412,11 +459,21 @@ export function MultiSelect(props: MultiSelectProps) {
           }
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          aria-label={placeholder}
+          aria-label={props.ariaLabel ?? placeholder}
         />
       </ComboboxChips>
 
       <ComboboxContent anchor={chipsAnchorRef}>
+        {props.searchLoading && (
+          <div
+            role='status'
+            aria-busy='true'
+            className='text-muted-foreground flex items-center gap-1.5 px-2.5 py-1.5 text-xs'
+          >
+            <Loader2 className='size-3 animate-spin' aria-hidden='true' />
+            {t('Loading...')}
+          </div>
+        )}
         <ComboboxList>
           <ComboboxCollection>
             {(item: string) => {

@@ -17,12 +17,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { createFileRoute, redirect } from '@tanstack/react-router'
+import * as z from 'zod'
 
 import { Dashboard } from '@/features/dashboard'
 import {
   DASHBOARD_SECTION_IDS,
   DASHBOARD_DEFAULT_SECTION,
+  DASHBOARD_ADMIN_ONLY_SECTION_IDS,
 } from '@/features/dashboard/section-registry'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
+
+const dashboardSearchSchema = z.object({
+  // Sub-view of the User Analytics section. Unknown values fall back to charts.
+  view: z.enum(['charts', 'usage']).optional().catch(undefined),
+})
+
+const ADMIN_ONLY_SECTIONS = new Set(DASHBOARD_ADMIN_ONLY_SECTION_IDS)
 
 export const Route = createFileRoute('/_authenticated/dashboard/$section')({
   beforeLoad: ({ params }) => {
@@ -33,6 +44,16 @@ export const Route = createFileRoute('/_authenticated/dashboard/$section')({
         params: { section: DASHBOARD_DEFAULT_SECTION },
       })
     }
+
+    // Admin-only sections refuse a direct link, not just a hidden tab.
+    const user = useAuthStore.getState().auth.user
+    if (
+      ADMIN_ONLY_SECTIONS.has(params.section) &&
+      (!user || user.role < ROLE.ADMIN)
+    ) {
+      throw redirect({ to: '/403' })
+    }
   },
+  validateSearch: dashboardSearchSchema,
   component: Dashboard,
 })

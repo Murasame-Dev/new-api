@@ -22,6 +22,7 @@ import type {
   FlowQuotaDataItem,
   QuotaDataItem,
   UptimeGroupResult,
+  UserModelUsageResponseData,
 } from './types'
 
 // ============================================================================
@@ -54,6 +55,49 @@ export async function getUserQuotaDates(
 // ----------------------------------------------------------------------------
 // System Monitoring
 // ----------------------------------------------------------------------------
+
+/**
+ * Recorded per-user, per-model usage for admins. The caller passes an already
+ * built query string so repeated `model` / `group` keys keep their bare form.
+ *
+ * React Query owns request de-duplication for this report, so the axios
+ * in-flight GET cache is bypassed: a StrictMode remount aborts and restarts the
+ * query, and the shared same-key promise would otherwise hand back the aborted
+ * request. The abort signal stays in effect.
+ */
+export async function getUserModelUsage(
+  search: URLSearchParams,
+  signal?: AbortSignal
+) {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: UserModelUsageResponseData
+  }>(`/api/data/user-models?${search.toString()}`, {
+    signal,
+    disableDuplicate: true,
+  })
+  return res.data
+}
+
+/**
+ * Bounded option search for the model and call-group pickers. `kind` decides
+ * the dimension; the other dimension's selections never narrow these results.
+ */
+export async function getUserModelUsageOptions(
+  search: URLSearchParams,
+  signal?: AbortSignal
+) {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: string[]
+  }>(`/api/data/user-models/options?${search.toString()}`, {
+    signal,
+    disableDuplicate: true,
+  })
+  return res.data
+}
 
 export async function getUserQuotaDataByUsers(params: {
   start_timestamp: number

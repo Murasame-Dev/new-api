@@ -213,6 +213,49 @@ export interface UserChartsFilters {
 }
 
 // ============================================================================
+// User Model Usage (admin cross-user breakdown)
+// ============================================================================
+
+/**
+ * One row of recorded usage for a (user, model) pair over the selected range.
+ * Values are sums of the hourly usage table, not a new billing result.
+ */
+export interface UserModelUsageItem {
+  user_id?: number
+  username?: string
+  model_name?: string
+  token_used?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
+  quota?: number
+}
+
+/** Totals over every row matching the filters, not only the current page. */
+export interface UserModelUsageSummary {
+  token_used?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
+  quota?: number
+}
+
+export interface UserModelUsageResponseData {
+  items?: UserModelUsageItem[]
+  total?: number
+  page?: number
+  page_size?: number
+  summary?: UserModelUsageSummary
+}
+
+export interface UserModelUsageFilters {
+  start: Date
+  end: Date
+  /** Exact historical username recorded with the usage rows. */
+  username: string
+  models: string[]
+  groups: string[]
+}
+
+// ============================================================================
 // API Info Types
 // ============================================================================
 

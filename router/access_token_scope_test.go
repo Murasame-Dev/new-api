@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -177,6 +178,49 @@ func TestDashboardPerfMetricsRequiresAdminReadAccess(t *testing.T) {
 			engine.ServeHTTP(recorder, req)
 			assert.Equal(t, tc.want, recorder.Code)
 			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
+		})
+	}
+}
+
+func TestDashboardUserModelUsageRequiresAdminLogReadAccess(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.UserAccessToken{}, &model.AuditLog{}, &model.QuotaData{}))
+	engine := gin.New()
+	SetApiRouter(engine)
+	for index, route := range []string{
+		"/api/data/user-models?start_timestamp=1000&end_timestamp=2000",
+		"/api/data/user-models/options?start_timestamp=1000&end_timestamp=2000&kind=model",
+	} {
+		t.Run(route, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, scope string
+				role, want  int
+			}{
+				{"guest", "", 0, http.StatusUnauthorized},
+				{"member", "log:read", common.RoleCommonUser, http.StatusForbidden},
+				{"admin-profile", "profile:read", common.RoleAdminUser, http.StatusForbidden},
+				{"admin-log", "log:read", common.RoleAdminUser, http.StatusOK},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := httptest.NewRequest(http.MethodGet, route, nil)
+					if tc.role != 0 {
+						username := fmt.Sprintf("%s-%d", tc.name, index)
+						user := model.User{Username: username, AffCode: username, Role: tc.role, Group: "default", Status: common.UserStatusEnabled}
+						require.NoError(t, model.DB.Create(&user).Error)
+						suffix, err := common.GenerateRandomCharsKey(43)
+						require.NoError(t, err)
+						raw := model.AccessTokenPrefix + suffix
+						token := model.UserAccessToken{Name: tc.name, TokenHash: model.AccessTokenFingerprint(raw), TokenHint: model.AccessTokenHint(raw)}
+						require.NoError(t, token.SetScopes([]string{tc.scope}))
+						require.NoError(t, model.CreateUserAccessToken(user.Id, &token, service.AccessTokenMaxPerUser))
+						req.Header.Set("Authorization", "Bearer "+raw)
+					}
+					recorder := httptest.NewRecorder()
+					engine.ServeHTTP(recorder, req)
+					assert.Equal(t, tc.want, recorder.Code)
+					assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
+				})
+			}
 		})
 	}
 }

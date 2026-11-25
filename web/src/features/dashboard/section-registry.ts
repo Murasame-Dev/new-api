@@ -51,6 +51,11 @@ export type DashboardSectionId = (typeof DASHBOARD_SECTIONS)[number]['id']
 
 const ADMIN_ONLY_SECTIONS = new Set<string>(['users'])
 
+/** Sections that only administrators may open, by section id. */
+export const DASHBOARD_ADMIN_ONLY_SECTION_IDS: readonly string[] = [
+  ...ADMIN_ONLY_SECTIONS,
+]
+
 const dashboardRegistry = createSectionRegistry<
   DashboardSectionId,
   Record<string, never>,

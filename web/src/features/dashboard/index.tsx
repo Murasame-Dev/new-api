@@ -109,6 +109,12 @@ const LazyUserCharts = lazy(() =>
   }))
 )
 
+const LazyUserModelUsageReport = lazy(() =>
+  import('./components/users/user-model-usage-report').then((m) => ({
+    default: m.UserModelUsageReport,
+  }))
+)
+
 const LazyFlowCharts = lazy(() =>
   import('./components/flow/flow-charts').then((m) => ({
     default: m.FlowCharts,
@@ -200,6 +206,7 @@ export function Dashboard() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const params = route.useParams()
+  const search = route.useSearch()
   const userRole = useAuthStore((state) => state.auth.user?.role)
   const activeSection = (params.section ??
     DASHBOARD_DEFAULT_SECTION) as DashboardSectionId
@@ -250,6 +257,11 @@ export function Dashboard() {
 
   const meta = SECTION_META[activeSection] ?? SECTION_META.overview
   const isAdmin = Boolean(userRole && userRole >= ROLE.ADMIN)
+  // The usage sub-view is admin-only and must not issue requests for anyone
+  // else, including an admin who lost the role while the view was open.
+  const activeUserView = search.view === 'usage' ? 'usage' : 'charts'
+  const showUserUsage = activeSection === 'users' && isAdmin
+  const userView = showUserUsage ? activeUserView : 'charts'
   const visibleSections = useMemo(
     () =>
       DASHBOARD_SECTION_IDS.filter(
@@ -262,12 +274,31 @@ export function Dashboard() {
       void navigate({
         to: '/dashboard/$section',
         params: { section: section as DashboardSectionId },
+        search: {},
+      })
+    },
+    [navigate]
+  )
+  const handleUserViewChange = useCallback(
+    (view: string) => {
+      void navigate({
+        to: '/dashboard/$section',
+        params: { section: 'users' },
+        search: view === 'usage' ? { view: 'usage' } : {},
       })
     },
     [navigate]
   )
   const showSectionTabs =
     activeSection !== 'overview' && visibleSections.length > 1
+  const userViewTabs = showUserUsage ? (
+    <Tabs value={userView} onValueChange={handleUserViewChange}>
+      <TabsList aria-label={t('User Analytics')}>
+        <TabsTrigger value='charts'>{t('Charts')}</TabsTrigger>
+        <TabsTrigger value='usage'>{t('User Model Usage')}</TabsTrigger>
+      </TabsList>
+    </Tabs>
+  ) : null
   const modelActions =
     activeSection === 'models' ? (
       <>
@@ -350,6 +381,11 @@ export function Dashboard() {
                 {sectionActions}
               </div>
             )}
+            {userViewTabs != null && (
+              <div className='flex shrink-0 flex-wrap items-center gap-1.5 sm:gap-2'>
+                {userViewTabs}
+              </div>
+            )}
           </div>
           {activeSection === 'models' && (
             <>
@@ -396,13 +432,20 @@ export function Dashboard() {
               </FadeIn>
             </>
           )}
-          {activeSection === 'users' && (
+          {activeSection === 'users' && isAdmin && userView === 'charts' && (
             <FadeIn>
               <Suspense fallback={<ModelChartsFallback />}>
                 <LazyUserCharts
                   filters={userChartsFilters}
                   onFiltersChange={setUserChartsFilters}
                 />
+              </Suspense>
+            </FadeIn>
+          )}
+          {showUserUsage && userView === 'usage' && (
+            <FadeIn>
+              <Suspense fallback={<ModelChartsFallback />}>
+                <LazyUserModelUsageReport enabled={isAdmin} />
               </Suspense>
             </FadeIn>
           )}
