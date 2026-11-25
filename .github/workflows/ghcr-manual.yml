@@ -23,9 +23,11 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Pin the exact commit so the image matches GITHUB_SHA even if the
-          # selected branch advances while the run is queued.
+          # selected branch advances while the run is queued. Full history and
+          # tags, so the version can follow the project's release convention.
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Resolve image name and version
         id: prep
@@ -43,19 +45,40 @@ jobs:
             echo "::error::Repository '${REPOSITORY}' does not form a valid GHCR image name"
             exit 1
           fi
-          tag="sha-${SHA:0:12}"
 
-          # The image tag, the embedded frontend version, and the ldflags version
-          # all derive from this value, so it describes exactly GITHUB_SHA.
-          printf '%s\n' "${tag}" > VERSION
+          # The image tag, the embedded frontend version, and the ldflags
+          # version all derive from the nearest reachable New API release tag,
+          # so they describe exactly GITHUB_SHA. The OCI tag is the sanitized
+          # form ('+' is not a valid Docker tag character).
+          resolved="$(bash .github/scripts/resolve-kanade-version.sh "${SHA}")"
+          version="$(sed -n 's/^version=//p' <<< "${resolved}")"
+          tag="$(sed -n 's/^oci_tag=//p' <<< "${resolved}")"
+          if [ -z "${version}" ] || [ -z "${tag}" ]; then
+            echo "::error::Could not parse version/tag from the version helper output"
+            exit 1
+          fi
+
+          # The Dockerfile stamps common.Version and the frontend build from
+          # VERSION, so the image reports the same Kanade version as its OCI
+          # metadata.
+          printf '%s\n' "${version}" > VERSION
 
           {
             echo "image=${image}"
             echo "sha=${SHA}"
+            echo "version=${version}"
             echo "tag=${tag}"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Building ${image}:${tag} from ${SHA}"
+          {
+            echo "### Build version"
+            echo
+            echo "- Resolved version: \`${version}\`"
+            echo "- New API base: \`${version#Kanade-}\`"
+            echo "- OCI tag: \`${tag}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Building ${image}:${tag} (${version}) from ${SHA}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -81,7 +104,7 @@ jobs:
             type=raw,value=${{ steps.prep.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.prep.outputs.tag }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.version }}
             org.opencontainers.image.revision=${{ steps.prep.outputs.sha }}
 
       - name: Build and push
@@ -102,6 +125,7 @@ jobs:
         env:
           IMAGE: ${{ steps.prep.outputs.image }}
           TAG: ${{ steps.prep.outputs.tag }}
+          VERSION: ${{ steps.prep.outputs.version }}
           REVISION: ${{ steps.prep.outputs.sha }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -144,7 +168,8 @@ jobs:
             echo "| Image | \`${ref}\` |"
             echo "| Digest | \`${DIGEST}\` |"
             echo "| Platforms | \`linux/amd64\` \`linux/arm64\` |"
-            echo "| Version | \`${TAG}\` |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| OCI tag | \`${TAG}\` |"
             echo "| Revision | \`${REVISION}\` |"
             echo
             echo '```'
